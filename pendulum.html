@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pendulum - Manual RL Playground</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #121212;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        h1 { margin: 0 0 10px 0; color: #00BCD4; letter-spacing: 1px; }
+        .subtitle { color: #aaaaaa; margin-bottom: 20px; font-size: 14px; }
+
+        #game-wrapper {
+            position: relative;
+            background-color: #1e1e24;
+            border: 2px solid #00BCD4;
+            border-radius: 8px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+        }
+
+        canvas { display: block; border-radius: 6px; }
+
+        #dashboard {
+            display: flex;
+            justify-content: space-between;
+            background: #23232c;
+            padding: 15px 30px;
+            border-radius: 8px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.4);
+            margin-top: 20px;
+            width: 740px; /* Matches canvas width - padding */
+        }
+
+        .metric {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            flex: 1;
+        }
+
+        .metric:not(:last-child) {
+            border-right: 1px solid #444;
+        }
+
+        .metric-title { font-size: 11px; color: #888; text-transform: uppercase; font-weight: bold; letter-spacing: 1px; }
+        .metric-value { font-size: 26px; font-weight: bold; font-family: monospace; transition: color 0.2s; }
+        
+        .safe { color: #4CAF50; }
+        .warning { color: #FFEB3B; }
+        .danger { color: #F44336; }
+
+        #overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border-radius: 6px;
+            display: none;
+        }
+
+        #overlay h2 { font-size: 32px; margin: 0 0 10px 0; color: #00BCD4;}
+        #overlay p { color: #ccc; font-size: 18px; margin-bottom: 20px; text-align: center;}
+        
+        button {
+            background-color: #00BCD4;
+            color: #000;
+            border: none;
+            padding: 12px 25px;
+            font-size: 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: transform 0.1s, background-color 0.2s;
+        }
+
+        button:hover { background-color: #26c6da; transform: scale(1.05); }
+        button:active { transform: scale(0.95); }
+
+        .controls {
+            margin-top: 15px;
+            color: #777;
+            font-size: 14px;
+        }
+        kbd {
+            background: #333; padding: 3px 8px; border-radius: 4px;
+            color: #fff; font-family: monospace; border-bottom: 2px solid #111;
+        }
+        
+        .progress-bar-container {
+            width: 100%;
+            height: 6px;
+            background: #333;
+            margin-top: -6px; /* Overlap canvas bottom */
+            border-bottom-left-radius: 6px;
+            border-bottom-right-radius: 6px;
+            overflow: hidden;
+            position: relative;
+            z-index: 10;
+        }
+        
+        #progress-bar {
+            height: 100%;
+            background: #00BCD4;
+            width: 0%;
+            transition: width 0.1s linear;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>PENDULUM</h1>
+    <div class="subtitle">Continuous Control Playground (Hold keys to build torque)</div>
+
+    <div id="game-wrapper">
+        <canvas id="gameCanvas" width="800" height="500"></canvas>
+        <div class="progress-bar-container">
+            <div id="progress-bar"></div>
+        </div>
+        <div id="overlay">
+            <h2>Episode Complete!</h2>
+            <p id="result-desc">Time's up.<br>Final Reward: 0</p>
+            <button onclick="resetGame()">Try Again (Space)</button>
+        </div>
+    </div>
+
+    <div id="dashboard">
+        <div class="metric">
+            <span class="metric-title">Reward (0 to -2000)</span>
+            <span class="metric-value" id="ui-reward">0.0</span>
+        </div>
+        <div class="metric">
+            <span class="metric-title">Angle (0° = UP)</span>
+            <span class="metric-value" id="ui-angle">0.0°</span>
+        </div>
+        <div class="metric">
+            <span class="metric-title">Velocity</span>
+            <span class="metric-value" id="ui-velocity">0.0</span>
+        </div>
+        <div class="metric">
+            <span class="metric-title">Applied Torque</span>
+            <span class="metric-value" id="ui-torque">0.00</span>
+        </div>
+    </div>
+
+    <div class="controls">
+        <kbd>←</kbd> Hold to apply Negative Torque &nbsp; | &nbsp; <kbd>→</kbd> Hold to apply Positive Torque
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Gymnasium Pendulum-v1 Physics Constants
+        const MAX_SPEED = 8.0;
+        const MAX_TORQUE = 2.0;
+        const DT = 0.05;
+        const G = 10.0;
+        const M = 1.0;
+        const L = 1.0;
+        const MAX_STEPS = 200;
+
+        // Visual Constants
+        const CENTER_X = canvas.width / 2;
+        const CENTER_Y = canvas.height / 2 + 50;
+        const PEND_LENGTH = 160;
+
+        // State Variables
+        let state = { th: 0, thdot: 0 };
+        let torque = 0;
+        let ep_reward = 0;
+        let steps = 0;
+        let isGameOver = false;
+        let keys = { ArrowLeft: false, ArrowRight: false };
+
+        // Input listeners
+        window.addEventListener('keydown', (e) => {
+            if (keys.hasOwnProperty(e.code)) {
+                keys[e.code] = true;
+                e.preventDefault(); 
+            }
+            if (e.code === 'Space' && isGameOver) resetGame();
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (keys.hasOwnProperty(e.code)) keys[e.code] = false;
+        });
+
+        function resetGame() {
+            // Gym init: random angle in [-pi, pi], random velocity in [-1, 1]
+            state = {
+                th: (Math.random() - 0.5) * 2 * Math.PI,
+                thdot: (Math.random() - 0.5) * 2
+            };
+            torque = 0;
+            ep_reward = 0;
+            steps = 0;
+            isGameOver = false;
+            document.getElementById('overlay').style.display = 'none';
+        }
+
+        // Angle normalization helper function (keeps angle between -pi and pi)
+        function normalizeAngle(th) {
+            return Math.atan2(Math.sin(th), Math.cos(th));
+        }
+
+        function updatePhysics() {
+            if (isGameOver) return;
+
+            // 1. Human Input -> Continuous Torque Mapping
+            // Holding the key ramps up the torque to emulate a continuous joystick
+            if (keys.ArrowRight) {
+                torque = Math.min(torque + 0.3, MAX_TORQUE);
+            } else if (keys.ArrowLeft) {
+                torque = Math.max(torque - 0.3, -MAX_TORQUE);
+            } else {
+                // Decay back to 0 if no key is pressed
+                torque *= 0.8;
+                if (Math.abs(torque) < 0.05) torque = 0;
+            }
+
+            // 2. Calculate Costs (Reward)
+            // Gym cost formula: theta_norm**2 + 0.1 * thdot**2 + 0.001 * (torque**2)
+            let th_norm = normalizeAngle(state.th);
+            let cost = Math.pow(th_norm, 2) + 0.1 * Math.pow(state.thdot, 2) + 0.001 * Math.pow(torque, 2);
+            ep_reward -= cost;
+
+            // 3. Step Physics (Euler Integration)
+            // Formula: newthdot = thdot + (3g/2l * sin(th) + 3/ml^2 * torque) * dt
+            let newthdot = state.thdot + (3 * G / (2 * L) * Math.sin(state.th) + 3.0 / (M * L * L) * torque) * DT;
+            
+            // Clamp velocity
+            newthdot = Math.max(-MAX_SPEED, Math.min(MAX_SPEED, newthdot));
+            
+            let newth = state.th + newthdot * DT;
+
+            state.th = newth;
+            state.thdot = newthdot;
+            steps++;
+
+            // 4. Check Episode End
+            if (steps >= MAX_STEPS) {
+                isGameOver = true;
+                let finalScore = ep_reward.toFixed(1);
+                
+                let performance = "";
+                if (ep_reward >= -250) performance = "🏆 Outstanding! You matched the RL Agent.";
+                else if (ep_reward >= -800) performance = "👍 Good effort! It stayed up for a bit.";
+                else performance = "💥 Needs work! Try to swing it up smoothly.";
+
+                document.getElementById('result-desc').innerHTML = `Final Reward: <b>${finalScore}</b><br><br><span style="font-size: 14px">${performance}</span>`;
+                document.getElementById('overlay').style.display = 'flex';
+            }
+
+            updateDashboard();
+        }
+
+        function updateDashboard() {
+            // Reward
+            const rewardUi = document.getElementById('ui-reward');
+            rewardUi.innerText = ep_reward.toFixed(1);
+            if (ep_reward < -1000) rewardUi.className = 'metric-value danger';
+            else if (ep_reward > -300) rewardUi.className = 'metric-value safe';
+            else rewardUi.className = 'metric-value';
+
+            // Angle
+            const angleUi = document.getElementById('ui-angle');
+            let norm_deg = normalizeAngle(state.th) * 180 / Math.PI;
+            angleUi.innerText = Math.abs(norm_deg).toFixed(1) + '°';
+            if (Math.abs(norm_deg) < 15) angleUi.className = 'metric-value safe';
+            else if (Math.abs(norm_deg) < 45) angleUi.className = 'metric-value warning';
+            else angleUi.className = 'metric-value danger';
+
+            // Velocity
+            const velUi = document.getElementById('ui-velocity');
+            velUi.innerText = state.thdot.toFixed(2);
+            if (Math.abs(state.thdot) > MAX_SPEED * 0.8) velUi.className = 'metric-value danger';
+            else velUi.className = 'metric-value safe';
+
+            // Torque
+            const torqueUi = document.getElementById('ui-torque');
+            torqueUi.innerText = torque.toFixed(2);
+            if (Math.abs(torque) >= MAX_TORQUE - 0.1) torqueUi.className = 'metric-value warning';
+            else torqueUi.className = 'metric-value safe';
+            
+            // Progress Bar
+            document.getElementById('progress-bar').style.width = `${(steps / MAX_STEPS) * 100}%`;
+        }
+
+        function draw() {
+            // Background
+            ctx.fillStyle = '#1e1e24';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw Base/Axle mount
+            ctx.fillStyle = '#333';
+            ctx.beginPath();
+            ctx.moveTo(CENTER_X - 20, CENTER_Y);
+            ctx.lineTo(CENTER_X + 20, CENTER_Y);
+            ctx.lineTo(CENTER_X + 30, canvas.height);
+            ctx.lineTo(CENTER_X - 30, canvas.height);
+            ctx.fill();
+
+            // Calculate Pendulum End Coordinates (0 degrees is UP)
+            let px = CENTER_X + PEND_LENGTH * Math.sin(state.th);
+            let py = CENTER_Y - PEND_LENGTH * Math.cos(state.th);
+
+            // Draw Pendulum Rod
+            ctx.beginPath();
+            ctx.moveTo(CENTER_X, CENTER_Y);
+            ctx.lineTo(px, py);
+            ctx.lineWidth = 18;
+            ctx.lineCap = 'round';
+            ctx.strokeStyle = '#00BCD4';
+            ctx.stroke();
+
+            // Inner styling for rod to give it depth
+            ctx.beginPath();
+            ctx.moveTo(CENTER_X, CENTER_Y);
+            ctx.lineTo(px, py);
+            ctx.lineWidth = 8;
+            ctx.lineCap = 'round';
+            ctx.strokeStyle = '#80deea';
+            ctx.stroke();
+
+            // Pivot joint
+            ctx.fillStyle = '#F44336';
+            ctx.beginPath();
+            ctx.arc(CENTER_X, CENTER_Y, 8, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(CENTER_X, CENTER_Y, 3, 0, 2 * Math.PI);
+            ctx.fill();
+
+            // Draw Torque Indicator (Curved Arrow around pivot)
+            if (Math.abs(torque) > 0.1) {
+                ctx.beginPath();
+                let radius = 40;
+                let startAngle = -Math.PI / 2;
+                let endAngle = startAngle + (torque / MAX_TORQUE) * Math.PI * 0.8; 
+                
+                ctx.arc(CENTER_X, CENTER_Y, radius, 
+                        torque > 0 ? startAngle : endAngle, 
+                        torque > 0 ? endAngle : startAngle);
+                
+                ctx.lineWidth = 4;
+                ctx.strokeStyle = 'rgba(255, 235, 59, 0.8)'; // Yellow indicator
+                ctx.stroke();
+                
+                // Draw Arrow Head
+                let headX = CENTER_X + radius * Math.cos(endAngle);
+                let headY = CENTER_Y + radius * Math.sin(endAngle);
+                ctx.beginPath();
+                ctx.arc(headX, headY, 5, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(255, 235, 59, 1.0)';
+                ctx.fill();
+            }
+        }
+
+        // The Pendulum environment logic step size (DT) is 0.05 seconds (20Hz).
+        // To accurately emulate the difficulty and speed of the gym environment,
+        // we run the physics update exactly every 50ms using setInterval, 
+        // while the rendering happens as fast as the monitor allows.
+        
+        setInterval(() => {
+            updatePhysics();
+        }, 50);
+
+        function renderLoop() {
+            draw();
+            requestAnimationFrame(renderLoop);
+        }
+
+        // Initialize and start
+        resetGame();
+        requestAnimationFrame(renderLoop);
+    </script>
+</body>
+</html>
