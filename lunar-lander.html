@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lunar Lander - Manual RL Playground</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #121212;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        h1 { margin: 0 0 10px 0; color: #BB86FC; letter-spacing: 1px; }
+        .subtitle { color: #aaaaaa; margin-bottom: 20px; font-size: 14px; }
+
+        #game-wrapper {
+            position: relative;
+            background-color: #1e1e24;
+            border: 2px solid #BB86FC;
+            border-radius: 8px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+        }
+
+        canvas { display: block; border-radius: 6px; }
+
+        #dashboard {
+            display: flex;
+            justify-content: space-between;
+            background: #23232c;
+            padding: 15px 30px;
+            border-radius: 8px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.4);
+            margin-top: 20px;
+            width: 740px; /* Matches canvas width - padding */
+        }
+
+        .metric {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            flex: 1;
+        }
+
+        .metric:not(:last-child) {
+            border-right: 1px solid #444;
+        }
+
+        .metric-title { font-size: 11px; color: #888; text-transform: uppercase; font-weight: bold; letter-spacing: 1px; }
+        .metric-value { font-size: 26px; font-weight: bold; font-family: monospace; transition: color 0.2s; }
+        
+        .safe { color: #4CAF50; }
+        .warning { color: #FFEB3B; }
+        .danger { color: #F44336; }
+
+        #overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border-radius: 6px;
+            display: none;
+        }
+
+        #overlay h2 { font-size: 32px; margin: 0 0 10px 0; }
+        #overlay p { color: #ccc; font-size: 18px; margin-bottom: 20px; }
+        
+        button {
+            background-color: #BB86FC;
+            color: #000;
+            border: none;
+            padding: 12px 25px;
+            font-size: 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: transform 0.1s, background-color 0.2s;
+        }
+
+        button:hover { background-color: #9965f4; transform: scale(1.05); }
+        button:active { transform: scale(0.95); }
+
+        .controls {
+            margin-top: 15px;
+            color: #777;
+            font-size: 14px;
+        }
+        kbd {
+            background: #333; padding: 3px 8px; border-radius: 4px;
+            color: #fff; font-family: monospace; border-bottom: 2px solid #111;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>LUNAR LANDER</h1>
+    <div class="subtitle">Stage 3-5 RL Environment Playground</div>
+
+    <div id="game-wrapper">
+        <canvas id="gameCanvas" width="800" height="500"></canvas>
+        <div id="overlay">
+            <h2 id="result-title">Crashed!</h2>
+            <p id="result-desc">You came in too fast.</p>
+            <button onclick="resetGame()">Play Again (Space)</button>
+        </div>
+    </div>
+
+    <div id="dashboard">
+        <div class="metric">
+            <span class="metric-title">Fuel</span>
+            <span class="metric-value" id="ui-fuel">1000</span>
+        </div>
+        <div class="metric">
+            <span class="metric-title">Vertical Speed (vy < 2.5)</span>
+            <span class="metric-value" id="ui-vspeed">0.0</span>
+        </div>
+        <div class="metric">
+            <span class="metric-title">Angle (θ < 15°)</span>
+            <span class="metric-value" id="ui-angle">0.0°</span>
+        </div>
+        <div class="metric">
+            <span class="metric-title">Position</span>
+            <span class="metric-value" id="ui-pos">CENTER</span>
+        </div>
+    </div>
+
+    <div class="controls">
+        <kbd>↑</kbd> Main Engine &nbsp; | &nbsp; <kbd>←</kbd> Right Engine (Roll Left) &nbsp; | &nbsp; <kbd>→</kbd> Left Engine (Roll Right)
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Physics Constants (Tuned for 60fps to mimic Box2D Gymnasium feel)
+        const GRAVITY = 0.05;
+        const MAIN_THRUST = 0.15;
+        const SIDE_THRUST = 0.03;
+        const ROTATION_THRUST = 0.005;
+        const DRAG = 0.999;
+        const ANGULAR_DRAG = 0.95;
+
+        // Terrain & Pad
+        const GROUND_Y = 430;
+        const PAD_X = 400;
+        const PAD_WIDTH = 120;
+
+        // Ship State
+        let ship = {};
+        let isGameOver = false;
+        let keys = { ArrowUp: false, ArrowLeft: false, ArrowRight: false };
+        let particles = [];
+
+        // Setup input listeners
+        window.addEventListener('keydown', (e) => {
+            if (keys.hasOwnProperty(e.code)) {
+                keys[e.code] = true;
+                e.preventDefault(); // Prevent scrolling
+            }
+            if (e.code === 'Space' && isGameOver) resetGame();
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (keys.hasOwnProperty(e.code)) keys[e.code] = false;
+        });
+
+        function resetGame() {
+            ship = {
+                x: 400,
+                y: 50,
+                vx: (Math.random() - 0.5) * 4, // Random horizontal start
+                vy: 0,
+                angle: (Math.random() - 0.5) * 0.5, // Random slight tilt
+                angular_vel: 0,
+                fuel: 1000
+            };
+            isGameOver = false;
+            particles = [];
+            document.getElementById('overlay').style.display = 'none';
+        }
+
+        function createParticles(x, y, vx, vy, color, count=1) {
+            for(let i=0; i<count; i++) {
+                particles.push({
+                    x: x, y: y,
+                    vx: vx + (Math.random()-0.5)*1,
+                    vy: vy + (Math.random()-0.5)*1,
+                    life: 1.0,
+                    color: color
+                });
+            }
+        }
+
+        function updatePhysics() {
+            if (isGameOver) return;
+
+            // 1. Process Inputs & Engines
+            let thrusting_main = false;
+            let thrusting_left = false; // Left engine (pushes right, rotates clockwise/right)
+            let thrusting_right = false; // Right engine (pushes left, rotates ccw/left)
+
+            if (ship.fuel > 0) {
+                if (keys.ArrowUp) {
+                    thrusting_main = true;
+                    ship.fuel -= 2;
+                }
+                // Note: ArrowRight fires the LEFT engine (to push ship right)
+                if (keys.ArrowRight) {
+                    thrusting_left = true;
+                    ship.fuel -= 1;
+                }
+                // ArrowLeft fires the RIGHT engine (to push ship left)
+                if (keys.ArrowLeft) {
+                    thrusting_right = true;
+                    ship.fuel -= 1;
+                }
+            }
+
+            // Calculate Force Vectors
+            const sinA = Math.sin(ship.angle);
+            const cosA = Math.cos(ship.angle);
+
+            if (thrusting_main) {
+                ship.vx += MAIN_THRUST * sinA;
+                ship.vy -= MAIN_THRUST * cosA;
+                // Visual flames
+                createParticles(ship.x - 15*sinA, ship.y + 15*cosA, -ship.vx*0.5 + sinA*5, -ship.vy*0.5 + cosA*5, '#ff9800', 3);
+            }
+
+            if (thrusting_left) {
+                // Pushes ship to the right, rotates clockwise
+                ship.vx += SIDE_THRUST * cosA;
+                ship.vy += SIDE_THRUST * sinA;
+                ship.angular_vel += ROTATION_THRUST;
+                createParticles(ship.x - 15*cosA, ship.y - 15*sinA, -cosA*3, -sinA*3, '#00bcd4', 1);
+            }
+
+            if (thrusting_right) {
+                // Pushes ship to the left, rotates counter-clockwise
+                ship.vx -= SIDE_THRUST * cosA;
+                ship.vy -= SIDE_THRUST * sinA;
+                ship.angular_vel -= ROTATION_THRUST;
+                createParticles(ship.x + 15*cosA, ship.y + 15*sinA, cosA*3, sinA*3, '#00bcd4', 1);
+            }
+
+            // 2. Apply Gravity & Kinematics
+            ship.vy += GRAVITY;
+            
+            ship.vx *= DRAG;
+            ship.vy *= DRAG;
+            ship.angular_vel *= ANGULAR_DRAG;
+
+            ship.x += ship.vx;
+            ship.y += ship.vy;
+            ship.angle += ship.angular_vel;
+
+            // Update particles
+            for (let i = particles.length - 1; i >= 0; i--) {
+                let p = particles[i];
+                p.x += p.vx; p.y += p.vy;
+                p.life -= 0.05;
+                if (p.life <= 0) particles.splice(i, 1);
+            }
+
+            checkCollisions();
+            updateDashboard();
+        }
+
+        function endGame(title, desc, isWin) {
+            isGameOver = true;
+            document.getElementById('overlay').style.display = 'flex';
+            document.getElementById('result-title').innerText = title;
+            document.getElementById('result-title').style.color = isWin ? '#4CAF50' : '#F44336';
+            document.getElementById('result-desc').innerText = desc;
+        }
+
+        function checkCollisions() {
+            // Out of bounds
+            if (ship.x < 0 || ship.x > canvas.width || ship.y < 0) {
+                endGame("Lost in Space!", "The lander flew out of the mission zone.", false);
+                return;
+            }
+
+            // Ground Collision
+            // We consider the bottom of the legs which is about ship.y + 15
+            if (ship.y + 15 >= GROUND_Y) {
+                ship.y = GROUND_Y - 15;
+                
+                // Gymnasium constraints for a successful landing
+                const isUpright = Math.abs(ship.angle) < 0.26; // ~15 degrees
+                const isSlow = Math.abs(ship.vy) < 2.5 && Math.abs(ship.vx) < 2.0;
+                const isOnPad = ship.x > (PAD_X - PAD_WIDTH/2) && ship.x < (PAD_X + PAD_WIDTH/2);
+
+                if (isOnPad && isUpright && isSlow) {
+                    endGame("Mission Accomplished!", "Perfect landing! (+200 Reward)", true);
+                } else if (!isOnPad) {
+                    endGame("Crashed!", "You missed the landing pad.", false);
+                } else if (!isUpright) {
+                    endGame("Crashed!", "Lander tipped over! Angle was too steep.", false);
+                } else {
+                    endGame("Crashed!", `Impact velocity too high (Speed: ${ship.vy.toFixed(1)}).`, false);
+                }
+            }
+        }
+
+        function updateDashboard() {
+            // Fuel
+            const fUi = document.getElementById('ui-fuel');
+            fUi.innerText = Math.max(0, ship.fuel);
+            fUi.className = ship.fuel < 200 ? 'metric-value danger' : 'metric-value safe';
+
+            // Vertical Speed
+            const vUi = document.getElementById('ui-vspeed');
+            vUi.innerText = ship.vy.toFixed(1);
+            if (ship.vy > 2.5) vUi.className = 'metric-value danger';
+            else if (ship.vy > 1.5) vUi.className = 'metric-value warning';
+            else vUi.className = 'metric-value safe';
+
+            // Angle
+            const aUi = document.getElementById('ui-angle');
+            const deg = (ship.angle * 180 / Math.PI);
+            aUi.innerText = Math.abs(deg).toFixed(1) + '°';
+            if (Math.abs(deg) > 15) aUi.className = 'metric-value danger';
+            else aUi.className = 'metric-value safe';
+
+            // Position (relative to pad)
+            const pUi = document.getElementById('ui-pos');
+            if (ship.x < PAD_X - PAD_WIDTH/2) { pUi.innerText = 'TOO FAR LEFT'; pUi.className='metric-value warning'; }
+            else if (ship.x > PAD_X + PAD_WIDTH/2) { pUi.innerText = 'TOO FAR RIGHT'; pUi.className='metric-value warning'; }
+            else { pUi.innerText = 'ON TARGET'; pUi.className='metric-value safe'; }
+        }
+
+        function draw() {
+            // Background
+            ctx.fillStyle = '#1e1e24';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Stars (Static aesthetic)
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(100, 100, 2, 2); ctx.fillRect(300, 50, 2, 2);
+            ctx.fillRect(600, 200, 2, 2); ctx.fillRect(750, 80, 2, 2);
+
+            // Terrain
+            ctx.fillStyle = '#333333';
+            ctx.beginPath();
+            ctx.moveTo(0, GROUND_Y);
+            // Draw some rough terrain outside the pad
+            ctx.lineTo(PAD_X - PAD_WIDTH/2 - 50, GROUND_Y);
+            ctx.lineTo(PAD_X - PAD_WIDTH/2, GROUND_Y);
+            // The Pad
+            ctx.lineTo(PAD_X + PAD_WIDTH/2, GROUND_Y);
+            // More terrain
+            ctx.lineTo(PAD_X + PAD_WIDTH/2 + 50, GROUND_Y);
+            ctx.lineTo(canvas.width, GROUND_Y);
+            ctx.lineTo(canvas.width, canvas.height);
+            ctx.lineTo(0, canvas.height);
+            ctx.fill();
+
+            // Landing Pad Highlight
+            ctx.fillStyle = '#BB86FC';
+            ctx.fillRect(PAD_X - PAD_WIDTH/2, GROUND_Y, PAD_WIDTH, 4);
+            ctx.fillStyle = '#777';
+            ctx.font = '12px Tahoma';
+            ctx.textAlign = 'center';
+            ctx.fillText("LANDING ZONE", PAD_X, GROUND_Y + 25);
+
+            // Draw Particles (Flames)
+            particles.forEach(p => {
+                ctx.fillStyle = p.color;
+                ctx.globalAlpha = p.life;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 3 * p.life, 0, Math.PI*2);
+                ctx.fill();
+            });
+            ctx.globalAlpha = 1.0;
+
+            // Draw Ship
+            ctx.save();
+            ctx.translate(ship.x, ship.y);
+            ctx.rotate(ship.angle);
+
+            // Ship Body (Polygon matching Gym)
+            ctx.fillStyle = '#BB86FC'; // Purple lander
+            ctx.beginPath();
+            ctx.moveTo(-12, -10); // Top Left
+            ctx.lineTo(12, -10);  // Top Right
+            ctx.lineTo(15, 5);    // Bottom Right
+            ctx.lineTo(8, 12);    // Inner Right
+            ctx.lineTo(-8, 12);   // Inner Left
+            ctx.lineTo(-15, 5);   // Bottom Left
+            ctx.closePath();
+            ctx.fill();
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = '#fff';
+            ctx.stroke();
+
+            // Cockpit window
+            ctx.fillStyle = '#1e1e24';
+            ctx.beginPath();
+            ctx.arc(0, -3, 5, 0, Math.PI*2);
+            ctx.fill();
+
+            // Legs
+            ctx.strokeStyle = '#aaaaaa';
+            ctx.lineWidth = 2;
+            // Left leg
+            ctx.beginPath(); ctx.moveTo(-10, 8); ctx.lineTo(-15, 18); ctx.lineTo(-20, 18); ctx.stroke();
+            // Right leg
+            ctx.beginPath(); ctx.moveTo(10, 8); ctx.lineTo(15, 18); ctx.lineTo(20, 18); ctx.stroke();
+
+            ctx.restore();
+        }
+
+        function gameLoop() {
+            updatePhysics();
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Start
+        resetGame();
+        gameLoop();
+    </script>
+</body>
+</html>
