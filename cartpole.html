@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CartPole - Manual RL Playground</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #121212;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        h1 { margin: 0 0 10px 0; color: #4CAF50; letter-spacing: 1px; }
+        .subtitle { color: #aaaaaa; margin-bottom: 20px; font-size: 14px; }
+
+        #game-wrapper {
+            position: relative;
+            background-color: #1e1e24;
+            border: 2px solid #4CAF50;
+            border-radius: 8px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+        }
+
+        canvas { display: block; border-radius: 6px; }
+
+        #dashboard {
+            display: flex;
+            justify-content: space-between;
+            background: #23232c;
+            padding: 15px 30px;
+            border-radius: 8px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.4);
+            margin-top: 20px;
+            width: 740px; /* Matches canvas width - padding */
+        }
+
+        .metric {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            flex: 1;
+        }
+
+        .metric:not(:last-child) {
+            border-right: 1px solid #444;
+        }
+
+        .metric-title { font-size: 11px; color: #888; text-transform: uppercase; font-weight: bold; letter-spacing: 1px; }
+        .metric-value { font-size: 26px; font-weight: bold; font-family: monospace; transition: color 0.2s; }
+        
+        .safe { color: #4CAF50; }
+        .warning { color: #FFEB3B; }
+        .danger { color: #F44336; }
+
+        #overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border-radius: 6px;
+            display: none;
+        }
+
+        #overlay h2 { font-size: 32px; margin: 0 0 10px 0; }
+        #overlay p { color: #ccc; font-size: 18px; margin-bottom: 20px; }
+        
+        button {
+            background-color: #4CAF50;
+            color: #000;
+            border: none;
+            padding: 12px 25px;
+            font-size: 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: transform 0.1s, background-color 0.2s;
+        }
+
+        button:hover { background-color: #45a049; transform: scale(1.05); }
+        button:active { transform: scale(0.95); }
+
+        .controls {
+            margin-top: 15px;
+            color: #777;
+            font-size: 14px;
+        }
+        kbd {
+            background: #333; padding: 3px 8px; border-radius: 4px;
+            color: #fff; font-family: monospace; border-bottom: 2px solid #111;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>CARTPOLE</h1>
+    <div class="subtitle">Stage 3-4 RL Environment Playground</div>
+
+    <div id="game-wrapper">
+        <canvas id="gameCanvas" width="800" height="500"></canvas>
+        <div id="overlay">
+            <h2 id="result-title">Episode Terminated</h2>
+            <p id="result-desc">Pole fell too far.</p>
+            <button onclick="resetGame()">Try Again (Space)</button>
+        </div>
+    </div>
+
+    <div id="dashboard">
+        <div class="metric">
+            <span class="metric-title">Reward (Steps)</span>
+            <span class="metric-value" id="ui-steps">0</span>
+        </div>
+        <div class="metric">
+            <span class="metric-title">Pole Angle (θ < 24°)</span>
+            <span class="metric-value" id="ui-angle">0.0°</span>
+        </div>
+        <div class="metric">
+            <span class="metric-title">Cart Position (x)</span>
+            <span class="metric-value" id="ui-pos">0.00</span>
+        </div>
+    </div>
+
+    <div class="controls">
+        <kbd>←</kbd> Push Cart Left &nbsp; | &nbsp; <kbd>→</kbd> Push Cart Right &nbsp; | &nbsp; Survive 500 steps to win!
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Physics Constants (CartPole)
+        const GRAVITY = 9.8;
+        const MASSCART = 1.0;
+        const MASSPOLE = 0.1;
+        const TOTAL_MASS = MASSCART + MASSPOLE;
+        const LENGTH = 0.5; // Actually half the pole's length
+        const POLEMASS_LENGTH = MASSPOLE * LENGTH;
+        const FORCE_MAG = 3.0; // Reduced from 10.0 to make manual keyboard play much easier!
+        const TAU = 0.02; // Seconds between state updates
+
+        // Thresholds
+        const MAX_DEGREES = 24; // Increased from strict 12 for human playability
+        const THETA_THRESHOLD = MAX_DEGREES * 2 * Math.PI / 360; 
+        const X_THRESHOLD = 2.4;
+        const MAX_STEPS = 500; // Gymnasium "solved" threshold
+
+        // Visual mapping
+        const SCALE = canvas.width / (X_THRESHOLD * 2);
+        const CART_Y = canvas.height - 150;
+        const CART_W = 60;
+        const CART_H = 35;
+        const POLE_W = 12;
+        const POLE_L = SCALE * (2 * LENGTH);
+
+        // State
+        let state = {};
+        let isGameOver = false;
+        let keys = { ArrowLeft: false, ArrowRight: false };
+
+        // Input listeners
+        window.addEventListener('keydown', (e) => {
+            if (keys.hasOwnProperty(e.code)) {
+                keys[e.code] = true;
+                e.preventDefault(); 
+            }
+            if (e.code === 'Space' && isGameOver) resetGame();
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (keys.hasOwnProperty(e.code)) keys[e.code] = false;
+        });
+
+        function resetGame() {
+            state = {
+                x: (Math.random() - 0.5) * 0.1,
+                x_dot: (Math.random() - 0.5) * 0.1,
+                theta: (Math.random() - 0.5) * 0.1,
+                theta_dot: (Math.random() - 0.5) * 0.1,
+                steps: 0
+            };
+            isGameOver = false;
+            document.getElementById('overlay').style.display = 'none';
+        }
+
+        function updatePhysics() {
+            if (isGameOver) return;
+
+            let force = 0;
+            if (keys.ArrowRight) force = FORCE_MAG;
+            else if (keys.ArrowLeft) force = -FORCE_MAG;
+
+            let costheta = Math.cos(state.theta);
+            let sintheta = Math.sin(state.theta);
+
+            // Kinematics calculations
+            let temp = (force + POLEMASS_LENGTH * state.theta_dot * state.theta_dot * sintheta) / TOTAL_MASS;
+            let thetaacc = (GRAVITY * sintheta - costheta * temp) / (LENGTH * (4.0 / 3.0 - MASSPOLE * costheta * costheta / TOTAL_MASS));
+            let xacc = temp - POLEMASS_LENGTH * thetaacc * costheta / TOTAL_MASS;
+
+            // Euler integration
+            state.x += TAU * state.x_dot;
+            state.x_dot += TAU * xacc;
+            state.theta += TAU * state.theta_dot;
+            state.theta_dot += TAU * thetaacc;
+            
+            state.steps++;
+
+            checkCollisions();
+            updateDashboard();
+        }
+
+        function endGame(title, desc, isWin) {
+            isGameOver = true;
+            document.getElementById('overlay').style.display = 'flex';
+            document.getElementById('result-title').innerText = title;
+            document.getElementById('result-title').style.color = isWin ? '#4CAF50' : '#F44336';
+            document.getElementById('result-desc').innerText = desc;
+        }
+
+        function checkCollisions() {
+            if (state.x < -X_THRESHOLD || state.x > X_THRESHOLD) {
+                endGame("Episode Terminated", "Cart pushed out of bounds!", false);
+            } else if (state.theta < -THETA_THRESHOLD || state.theta > THETA_THRESHOLD) {
+                endGame("Episode Terminated", `Pole fell past ${MAX_DEGREES} degrees!`, false);
+            } else if (state.steps >= MAX_STEPS) {
+                endGame("Environment Solved!", `You survived ${MAX_STEPS} steps!`, true);
+            }
+        }
+
+        function updateDashboard() {
+            // Steps (Reward)
+            const stepsUi = document.getElementById('ui-steps');
+            stepsUi.innerText = state.steps;
+            stepsUi.className = state.steps > 200 ? 'metric-value safe' : 'metric-value';
+
+            // Angle
+            const angleUi = document.getElementById('ui-angle');
+            const deg = (state.theta * 180 / Math.PI);
+            angleUi.innerText = Math.abs(deg).toFixed(1) + '°';
+            if (Math.abs(deg) > MAX_DEGREES * 0.8) angleUi.className = 'metric-value danger';
+            else if (Math.abs(deg) > MAX_DEGREES * 0.5) angleUi.className = 'metric-value warning';
+            else angleUi.className = 'metric-value safe';
+
+            // Position
+            const posUi = document.getElementById('ui-pos');
+            posUi.innerText = state.x.toFixed(2);
+            if (Math.abs(state.x) > X_THRESHOLD * 0.8) posUi.className = 'metric-value danger';
+            else if (Math.abs(state.x) > X_THRESHOLD * 0.5) posUi.className = 'metric-value warning';
+            else posUi.className = 'metric-value safe';
+        }
+
+        function draw() {
+            // Background
+            ctx.fillStyle = '#1e1e24';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw Track
+            ctx.beginPath();
+            ctx.moveTo(0, CART_Y);
+            ctx.lineTo(canvas.width, CART_Y);
+            ctx.strokeStyle = '#555';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Calculate Canvas X position
+            let canvasX = (state.x + X_THRESHOLD) * SCALE;
+
+            // Draw Cart
+            ctx.fillStyle = '#4CAF50';
+            ctx.fillRect(canvasX - CART_W / 2, CART_Y - CART_H / 2, CART_W, CART_H);
+            
+            // Draw Wheels
+            ctx.fillStyle = '#111';
+            ctx.beginPath();
+            ctx.arc(canvasX - CART_W / 3, CART_Y + CART_H / 2, 7, 0, 2 * Math.PI);
+            ctx.arc(canvasX + CART_W / 3, CART_Y + CART_H / 2, 7, 0, 2 * Math.PI);
+            ctx.fill();
+
+            // Draw Force Indicator (Arrows)
+            if (keys.ArrowRight) {
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+                ctx.beginPath();
+                ctx.moveTo(canvasX + CART_W / 2 + 5, CART_Y);
+                ctx.lineTo(canvasX + CART_W / 2 + 20, CART_Y - 10);
+                ctx.lineTo(canvasX + CART_W / 2 + 20, CART_Y + 10);
+                ctx.fill();
+            } else if (keys.ArrowLeft) {
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+                ctx.beginPath();
+                ctx.moveTo(canvasX - CART_W / 2 - 5, CART_Y);
+                ctx.lineTo(canvasX - CART_W / 2 - 20, CART_Y - 10);
+                ctx.lineTo(canvasX - CART_W / 2 - 20, CART_Y + 10);
+                ctx.fill();
+            }
+
+            // Draw Pole
+            ctx.save();
+            ctx.translate(canvasX, CART_Y);
+            // Canvas Y goes down, so rotate appropriately
+            ctx.rotate(state.theta); 
+            
+            ctx.fillStyle = '#e0e0e0';
+            ctx.fillRect(-POLE_W / 2, -POLE_L, POLE_W, POLE_L);
+            
+            // Draw Axle/Hinge
+            ctx.fillStyle = '#F44336';
+            ctx.beginPath();
+            ctx.arc(0, 0, 6, 0, 2 * Math.PI);
+            ctx.fill();
+            
+            ctx.restore();
+        }
+
+        function gameLoop() {
+            // Run physics step multiple times per frame for smoothness/stability 
+            // without slowing down the visible action too much.
+            // Since TAU=0.02 is 50Hz, running it once per requestAnimationFrame (usually 60Hz) is standard.
+            if(!isGameOver) {
+                updatePhysics();
+            }
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Initialize and start
+        resetGame();
+        requestAnimationFrame(gameLoop);
+    </script>
+</body>
+</html>
