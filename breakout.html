@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Breakout - Manual RL Playground</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #121212;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        h1 { margin: 0 0 10px 0; color: #FF5722; letter-spacing: 1px; text-transform: uppercase; }
+        .subtitle { color: #aaaaaa; margin-bottom: 20px; font-size: 14px; }
+
+        #game-wrapper {
+            position: relative;
+            background-color: #1e1e24;
+            border: 2px solid #FF5722;
+            border-radius: 8px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+        }
+
+        canvas { display: block; border-radius: 6px; }
+
+        #dashboard {
+            display: flex;
+            justify-content: space-between;
+            background: #23232c;
+            padding: 15px 30px;
+            border-radius: 8px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.4);
+            margin-top: 20px;
+            width: 740px; /* Matches canvas width - padding */
+        }
+
+        .metric {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            flex: 1;
+        }
+
+        .metric:not(:last-child) {
+            border-right: 1px solid #444;
+        }
+
+        .metric-title { font-size: 11px; color: #888; text-transform: uppercase; font-weight: bold; letter-spacing: 1px; }
+        .metric-value { font-size: 26px; font-weight: bold; font-family: monospace; transition: color 0.2s; }
+        
+        .safe { color: #4CAF50; }
+        .warning { color: #FFEB3B; }
+        .danger { color: #F44336; }
+
+        #overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border-radius: 6px;
+            display: none;
+        }
+
+        #overlay h2 { font-size: 32px; margin: 0 0 10px 0; }
+        #overlay p { color: #ccc; font-size: 18px; margin-bottom: 20px; text-align: center;}
+        
+        button {
+            background-color: #FF5722;
+            color: #fff;
+            border: none;
+            padding: 12px 25px;
+            font-size: 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: transform 0.1s, background-color 0.2s;
+        }
+
+        button:hover { background-color: #f4511e; transform: scale(1.05); }
+        button:active { transform: scale(0.95); }
+
+        .controls {
+            margin-top: 15px;
+            color: #777;
+            font-size: 14px;
+        }
+        kbd {
+            background: #333; padding: 3px 8px; border-radius: 4px;
+            color: #fff; font-family: monospace; border-bottom: 2px solid #111;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>ATARI BREAKOUT</h1>
+    <div class="subtitle">Discrete Action Space (Left, Right, No-Op)</div>
+
+    <div id="game-wrapper">
+        <canvas id="gameCanvas" width="800" height="500"></canvas>
+        <div id="overlay">
+            <h2 id="result-title">Game Over</h2>
+            <p id="result-desc">You ran out of lives.</p>
+            <button onclick="resetGame()">Play Again (Space)</button>
+        </div>
+    </div>
+
+    <div id="dashboard">
+        <div class="metric">
+            <span class="metric-title">Reward (Score)</span>
+            <span class="metric-value safe" id="ui-reward">0</span>
+        </div>
+        <div class="metric">
+            <span class="metric-title">Lives (Episodic)</span>
+            <span class="metric-value" id="ui-lives">1</span>
+        </div>
+        <div class="metric">
+            <span class="metric-title">Ball Velocity (vx, vy)</span>
+            <span class="metric-value" id="ui-velocity">0, 0</span>
+        </div>
+        <div class="metric">
+            <span class="metric-title">Paddle X</span>
+            <span class="metric-value" id="ui-paddle">0.0</span>
+        </div>
+    </div>
+
+    <div class="controls">
+        <kbd>←</kbd> Move Left &nbsp; | &nbsp; <kbd>→</kbd> Move Right &nbsp; | &nbsp; +1 Reward per Brick
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Game Constants
+        const PADDLE_SPEED = 8.0;
+        const BALL_SPEED = 5.0;
+        const BRICK_ROW_COUNT = 6;
+        const BRICK_COLUMN_COUNT = 10;
+        const BRICK_WIDTH = 70;
+        const BRICK_HEIGHT = 20;
+        const BRICK_PADDING = 8;
+        const BRICK_OFFSET_TOP = 50;
+        const BRICK_OFFSET_LEFT = 15;
+
+        // Colors (Atari Style)
+        const COLORS = ['#F44336', '#FF9800', '#FFEB3B', '#4CAF50', '#2196F3', '#9C27B0'];
+
+        // Entities
+        let paddle = { x: 0, y: 0, width: 100, height: 12 };
+        let ball = { x: 0, y: 0, vx: 0, vy: 0, radius: 6 };
+        let bricks = [];
+
+        // State
+        let reward = 0;
+        let lives = 1;
+        let isGameOver = false;
+        let keys = { ArrowLeft: false, ArrowRight: false };
+
+        // Input Listeners
+        window.addEventListener('keydown', (e) => {
+            if (keys.hasOwnProperty(e.code)) {
+                keys[e.code] = true;
+                e.preventDefault(); 
+            }
+            if (e.code === 'Space' && isGameOver) resetGame();
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (keys.hasOwnProperty(e.code)) keys[e.code] = false;
+        });
+
+        function initBricks() {
+            bricks = [];
+            for (let c = 0; c < BRICK_COLUMN_COUNT; c++) {
+                bricks[c] = [];
+                for (let r = 0; r < BRICK_ROW_COUNT; r++) {
+                    bricks[c][r] = { x: 0, y: 0, status: 1, color: COLORS[r % COLORS.length] };
+                }
+            }
+        }
+
+        function resetBall() {
+            ball.x = paddle.x + paddle.width / 2;
+            ball.y = paddle.y - 15;
+            ball.vx = (Math.random() > 0.5 ? 1 : -1) * (BALL_SPEED * 0.8);
+            ball.vy = -BALL_SPEED;
+        }
+
+        function resetGame() {
+            reward = 0;
+            lives = 1;
+            isGameOver = false;
+            
+            paddle.x = (canvas.width - paddle.width) / 2;
+            paddle.y = canvas.height - 30;
+
+            initBricks();
+            resetBall();
+            
+            document.getElementById('overlay').style.display = 'none';
+        }
+
+        function collisionDetection() {
+            for (let c = 0; c < BRICK_COLUMN_COUNT; c++) {
+                for (let r = 0; r < BRICK_ROW_COUNT; r++) {
+                    let b = bricks[c][r];
+                    if (b.status === 1) {
+                        // AABB Collision logic
+                        let testX = ball.x;
+                        let testY = ball.y;
+
+                        if (ball.x < b.x) testX = b.x;      // left edge
+                        else if (ball.x > b.x + BRICK_WIDTH) testX = b.x + BRICK_WIDTH;   // right edge
+                        
+                        if (ball.y < b.y) testY = b.y;      // top edge
+                        else if (ball.y > b.y + BRICK_HEIGHT) testY = b.y + BRICK_HEIGHT; // bottom edge
+
+                        let distX = ball.x - testX;
+                        let distY = ball.y - testY;
+                        let distance = Math.sqrt((distX*distX) + (distY*distY));
+
+                        if (distance <= ball.radius) {
+                            // Hit!
+                            b.status = 0;
+                            reward += 1; // RL Agent receives +1 reward
+
+                            // Check collision angle for reflection
+                            if (ball.x > b.x && ball.x < b.x + BRICK_WIDTH) {
+                                ball.vy = -ball.vy; // Top/Bottom hit
+                            } else {
+                                ball.vx = -ball.vx; // Side hit
+                            }
+
+                            // Check Win Condition
+                            if (reward === BRICK_ROW_COUNT * BRICK_COLUMN_COUNT) {
+                                endGame("Environment Solved!", `You cleared all the bricks!\nFinal Reward: ${reward}`, true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        function updatePhysics() {
+            if (isGameOver) return;
+
+            // Move Paddle
+            if (keys.ArrowRight && paddle.x < canvas.width - paddle.width) {
+                paddle.x += PADDLE_SPEED;
+            } else if (keys.ArrowLeft && paddle.x > 0) {
+                paddle.x -= PADDLE_SPEED;
+            }
+
+            // Move Ball
+            ball.x += ball.vx;
+            ball.y += ball.vy;
+
+            // Wall Collisions
+            if (ball.x + ball.vx > canvas.width - ball.radius || ball.x + ball.vx < ball.radius) {
+                ball.vx = -ball.vx;
+            }
+            if (ball.y + ball.vy < ball.radius) {
+                ball.vy = -ball.vy;
+            } 
+            // Bottom collision (Death)
+            else if (ball.y + ball.vy > canvas.height - ball.radius) {
+                lives--; // RL Agent receives a negative reward implicitly via terminal state
+                endGame("Episode Terminated", `Episodic wrapper: Terminated on first drop.\nFinal Reward: ${reward}`, false);
+            }
+
+            // Paddle Collision
+            // A slightly more complex AABB check for the paddle
+            if (ball.y + ball.radius >= paddle.y && ball.y - ball.radius <= paddle.y + paddle.height) {
+                if (ball.x >= paddle.x && ball.x <= paddle.x + paddle.width) {
+                    // Prevent ball from getting "stuck" inside paddle
+                    ball.y = paddle.y - ball.radius;
+                    ball.vy = -ball.vy;
+                    
+                    // Modify X velocity based on where it hit the paddle (English/Spin)
+                    let hitPoint = ball.x - (paddle.x + paddle.width / 2);
+                    ball.vx = hitPoint * 0.15; 
+                }
+            }
+
+            collisionDetection();
+            updateDashboard();
+        }
+
+        function endGame(title, desc, isWin) {
+            isGameOver = true;
+            document.getElementById('overlay').style.display = 'flex';
+            document.getElementById('result-title').innerText = title;
+            document.getElementById('result-title').style.color = isWin ? '#4CAF50' : '#FF5722';
+            document.getElementById('result-desc').innerText = desc;
+        }
+
+        function updateDashboard() {
+            // Reward
+            document.getElementById('ui-reward').innerText = reward;
+
+            // Lives
+            const livesUi = document.getElementById('ui-lives');
+            livesUi.innerText = lives;
+            if (lives === 1) livesUi.className = 'metric-value safe';
+            else livesUi.className = 'metric-value danger';
+
+            // Velocity
+            document.getElementById('ui-velocity').innerText = `${ball.vx.toFixed(1)}, ${ball.vy.toFixed(1)}`;
+            
+            // Paddle X
+            document.getElementById('ui-paddle').innerText = paddle.x.toFixed(1);
+        }
+
+        function draw() {
+            // Background
+            ctx.fillStyle = '#1e1e24';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw Bricks
+            for (let c = 0; c < BRICK_COLUMN_COUNT; c++) {
+                for (let r = 0; r < BRICK_ROW_COUNT; r++) {
+                    if (bricks[c][r].status === 1) {
+                        let brickX = (c * (BRICK_WIDTH + BRICK_PADDING)) + BRICK_OFFSET_LEFT;
+                        let brickY = (r * (BRICK_HEIGHT + BRICK_PADDING)) + BRICK_OFFSET_TOP;
+                        bricks[c][r].x = brickX;
+                        bricks[c][r].y = brickY;
+
+                        ctx.beginPath();
+                        ctx.rect(brickX, brickY, BRICK_WIDTH, BRICK_HEIGHT);
+                        ctx.fillStyle = bricks[c][r].color;
+                        ctx.fill();
+                        ctx.strokeStyle = '#1e1e24';
+                        ctx.lineWidth = 2;
+                        ctx.stroke();
+                        ctx.closePath();
+                    }
+                }
+            }
+
+            // Draw Paddle
+            ctx.beginPath();
+            ctx.rect(paddle.x, paddle.y, paddle.width, paddle.height);
+            ctx.fillStyle = '#00BCD4'; // Cyan paddle
+            ctx.fill();
+            
+            // Draw Ball
+            ctx.beginPath();
+            ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+            ctx.fillStyle = '#ffffff';
+            ctx.fill();
+            // Ball glow effect
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = 'white';
+            ctx.fill();
+            ctx.shadowBlur = 0; // reset
+        }
+
+        function gameLoop() {
+            updatePhysics();
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Initialize and start
+        resetGame();
+        requestAnimationFrame(gameLoop);
+    </script>
+</body>
+</html>
