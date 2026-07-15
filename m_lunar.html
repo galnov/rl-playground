@@ -156,8 +156,11 @@
         @media (max-width: 768px) {
             #mobile-controls { display: flex; } /* Show touch controls */
             .controls { display: none; } /* Hide keyboard instructions */
+            #dashboard { padding: 10px 5px; gap: 8px; justify-content: center; }
+            .metric { min-width: 30%; flex-basis: 30%; margin-bottom: 5px; } /* Force clean wrapping into a grid */
             .metric:not(:last-child) { border-right: none; } /* Clean up grid on mobile */
-            .metric-value { font-size: 18px; }
+            .metric-title { font-size: 9px; letter-spacing: 0px; text-align: center; }
+            .metric-value { font-size: 16px; }
             h1 { font-size: 24px; margin-top: 10px; }
         }
     </style>
@@ -187,7 +190,7 @@
             <span class="metric-value" id="ui-fuel">1000</span>
         </div>
         <div class="metric">
-            <span class="metric-title">Vertical Speed</span>
+            <span class="metric-title">V. Speed</span>
             <span class="metric-value" id="ui-vspeed">0.0</span>
         </div>
         <div class="metric">
